@@ -2,8 +2,9 @@ use std::{fs, process};
 use std::path::PathBuf;
 use rand::Rng;
 
-
-const FONTSET: [u8; 80] = [
+const PROGRAM_START: u16 = 0x200;
+const ETI_660_START: u16 = 0x600;
+const FONTSET: [u8; 80]  = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
     0x20, 0x60, 0x20, 0x20, 0x70, // 1
     0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
@@ -22,53 +23,54 @@ const FONTSET: [u8; 80] = [
     0xF0, 0x80, 0xF0, 0x80, 0x80  // F
 ];
 
-struct Chip_8 {
-    sp:           u8,          // Keeps track of the stack level in use
-    delay_timer:  u8,          // When > 0, counts down at 60 Hz to 0
-    sound_timer:  u8,          // Buzzer sounds when count hits 0
-    rng_byte:     u8,          // Random value in 0..255
+struct Chip8 {
+    sp:           u8,             // Keeps track of the stack level in use
+    delay_timer:  u8,             // When > 0, counts down at 60 Hz to 0
+    sound_timer:  u8,             // Buzzer sounds when count hits 0
+    rng_byte:     u8,             // Random value in 0..255
 
-    opcode:       u16,         // 35 opcodes, each 2 bytes long
-    idx_register: u16,         // Index register I
-    pc:           u16,         // Program counter (0x000-0xFFF)
-    
+    opcode:       u16,            // 35 opcodes, each 2 bytes long
+    idx_register: u16,            // Index register I
+    pc:           u16,            // Program counter (0x000-0xFFF)
+
     /* 
     * Memory map:
     *   0x000-0x1FF: Chip-8 interpreter (contains font set in emulation)
     *   0x050-0x0A0: Used for the built-in 4x5 pixel font set (0-F)
     *   0x200-0xFFF: Program ROM and RAM
     */
-    memory:       [u8; 4096],  // 4KB memory
-    gfx:          [u8; 2048],  // 64*32 px screen
-    stack:        [u16;  16],  // Stack has 16 levels
-    registers:    [u8;   16],  // 15 8-bit general-purpose registers (V0-VE), 16th is used for the carry flag
-    key:          [u8;   16],  // HEX-based keypad (0x0-0xF). Stores current state of key
+    memory:       [u8; 4096],     // 4KB memory
+    gfx:          [u8; 2048],     // 64*32 px screen
+    stack:        [u16;  16],     // Stack has 16 levels
+    key:          [u8;   16],     // HEX-based keypad (0x0-0xF). Stores current state of key
+    registers:    [u8;   16],     // 15 8-bit general-purpose registers (V0-VE; "Vx"), 16th, VF, 
+                                  // is used for the carry flag and should not be used by any program
 }
 
-impl Chip_8 {
-    fn new() -> Chip_8 {
+impl Chip8 {
+    fn new() -> Chip8 {
         // Init registers and memory
-        let sp:           u8         = 0;      // Reset stack pointer
+        let sp:           u8         = 0;              // Reset stack pointer
         let delay_timer:  u8         = 0;
         let sound_timer:  u8         = 0;
         let rng_byte:     u8         = 0;
        
-        let opcode:       u16        = 0;      // Reset current opcode
-        let idx_register: u16        = 0;      // Reset I
-        let pc:           u16        = 0x200;  // Application is loaded at location 0x200, so pc starts here
+        let opcode:       u16        = 0;              // Reset current opcode
+        let idx_register: u16        = 0;              // Reset I
+        let pc:           u16        = PROGRAM_START;  // Application is loaded at location 0x200, so pc starts here
         
         let mut memory:   [u8; 4096] = [0; 4096];
         let gfx:          [u8; 2048] = [1; 2048];
         let stack:        [u16;  16] = [0; 16];
-        let registers:    [u8;   16] = [0; 16];
         let key:          [u8;   16] = [0; 16];
+        let registers:    [u8;   16] = [0; 16];
 
         // Load fontset into memory
         for i in 0..80 {
             memory[0x50 + i] = FONTSET[i];
         }
 
-        Chip_8 {
+        Chip8 {
             pc,
             opcode,
             idx_register,
@@ -94,19 +96,193 @@ impl Chip_8 {
 
         // Load ROM data into memory starting at address 0x200
         for (i, byte) in rom.enumerate() {
-            self.memory[0x200 + i] = byte;
+            self.memory[PROGRAM_START as usize + i] = byte;
         }
     }
 
-    /*** Instructions ***/
+
+    /************************************************/
+    /******            Instructions            ******/
+    /************************************************/
 
     // Clear the display (CLS)
     fn op_00E0(&mut self) {
         self.gfx.fill(0);
     }
 
-    // Return from subroutine
+    // Return from subroutine (RET)
+    fn op_00EE(&mut self) {
+        self.sp -= 1;
+        self.pc = self.stack[self.sp as usize]
+    }
 
+    // Jump to location nnn (JP addr)
+    fn op_1nnn(&mut self) {
+        // "nnn or addr - A 12-bit value, the lowest 12 bits of the instruction"
+        let address: u16 = self.opcode & 0x0FFF_u16;
+        self.pc = address;
+    }
+
+    // Call subroutine at nnn (CALL addr)
+    fn op_2nnn(&mut self) {
+        // "nnn or addr - A 12-bit value, the lowest 12 bits of the instruction"
+        let address: u16 = self.opcode & 0x0FFF_u16;
+
+        self.stack[self.sp as usize] = self.pc;  // Put current PC onto the stack so we can return
+        self.sp += 1;                            // Increment SP to next location on the stack
+        self.pc = address;
+    }
+
+    // Skip to next instruction if Vx == kk (SE Vx, byte)
+    fn op_3xkk(&mut self) {
+        // "kk or byte - An 8-bit value, the lowest 8 bits of the instruction"
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let kk: u8    =   self.opcode as u8;
+
+        if self.registers[vx] == kk {
+            self.pc += 2;
+        }
+    }
+
+    // Skip to next instruction if Vx != kk (SE Vx, byte)
+    fn op_4xkk(&mut self) {
+        // "kk or byte - An 8-bit value, the lowest 8 bits of the instruction"
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let kk: u8    =   self.opcode as u8;
+
+        if self.registers[vx] != kk {
+            self.pc += 2;
+        }
+    }
+
+    // Skip next instruction if Vx == Vy (SE Vx, Vy)
+    fn op_5xy0(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        if self.registers[vx] == self.registers[vy] {
+            self.pc += 2;
+        }
+    }
+
+    // Set Vx = kk (LD Vx, byte)
+    // Put value kk into register Vx
+    fn op_6xkk(&mut self) {
+        // "kk or byte - An 8-bit value, the lowest 8 bits of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let kk: u8    =   self.opcode as u8;
+
+        self.registers[vx] = kk;
+    }
+
+    // Set Vx = Vx + kk (ADD Vx, byte)
+    // Adds the value kk to the value of register Vx, then stores the result in Vx.
+    fn op_7xkk(&mut self) {
+        // "kk or byte - An 8-bit value, the lowest 8 bits of the instruction"
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let kk: u8    =   self.opcode as u8;
+
+        self.registers[vx] += kk;
+    }
+
+    // Set Vx = Vy (LD Vx, vy)
+    fn op_8xy0(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        self.registers[vx] = self.registers[vy];
+    }
+
+    // Set Vx = Vx OR Vy (OR Vx, Vy)
+    fn op_8xy1(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        self.registers[vx] |= self.registers[vy];
+    }
+
+    // Set Vx = Vx AND Vy (AND Vx, Vy)
+    fn op_8xy2(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        self.registers[vx] &= self.registers[vy];
+    }
+
+    // Set Vx = Vx XOR Vy (XOR Vx, Vy)
+    fn op_8xy3(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        self.registers[vx] ^= self.registers[vy];
+    }
+
+    // Set Vx = Vx + Vy (ADD Vx, Vy)
+    fn op_8xy4(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        let (sum, overflow): (u8, bool) = self.registers[vx].overflowing_add(self.registers[vy]);
+        self.registers[vx] = sum;
+        self.registers[0xF] = if overflow {1u8} else {0u8};
+    }
+
+    // Set Vx = Vx - Vy (SUB Vx, Vy)
+    fn op_8xy5(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        self.registers[0xF] = if self.registers[vx] > self.registers[vy] {1u8} else {0u8};
+        self.registers[vx] -= self.registers[vy];
+    }
+
+    // Set Vx = Vx shift right 1 (SHR Vx {, Vy})
+    // "If the least-significant bit of Vx is 1, then VF is set to 1, otherwise 0. Then Vx is divided by 2."
+    fn op_8xy6(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        self.registers[0xF] = self.registers[vx] & 0x1;
+        self.registers[vx] >>= 1u8;
+    }
+
+    // Set Vx = Vy - Vx (SUBN Vx, Vy)
+    fn op_8xy7(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        self.registers[0xF] = if self.registers[vy] > self.registers[vx] {1u8} else {0u8};
+        self.registers[vx] = self.registers[vy] - self.registers[vx];
+    }
+
+    // Set Vx = Vx shift left 1 (SHL Vx {, Vy})
+    // "If the most-significant bit of Vx is 1, then VF is set to 1, otherwise to 0. Then Vx is multiplied by 2."
+    fn op_8xyE(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        self.registers[0xF] = (self.registers[vx] & 0x80) >> 7u8;
+        self.registers[vx] <<= 1u8;
+    }
 }
 
 
@@ -116,14 +292,14 @@ mod tests {
 
     #[test]
     fn construtor() {
-        let chp = Chip_8::new();
+        let chp = Chip8::new();
         assert_eq!(chp.sp,           0);
         assert_eq!(chp.delay_timer,  0);
         assert_eq!(chp.sound_timer,  0);
         assert_eq!(chp.rng_byte,     0);
         assert_eq!(chp.opcode,       0);
         assert_eq!(chp.idx_register, 0);
-        assert_eq!(chp.pc,           0x200);
+        assert_eq!(chp.pc,           PROGRAM_START);
         assert_eq!(chp.gfx,          [1; 2048]);
         assert_eq!(chp.stack,        [0; 16]);
         assert_eq!(chp.registers,    [0; 16]);
@@ -135,10 +311,23 @@ mod tests {
     }
 
     #[test]
-    fn cls() {
-        let mut chp = Chip_8::new();
+    fn op_00E0() {
+        let mut chp = Chip8::new();
         assert_eq!(chp.gfx, [1; 2048]);
         chp.op_00E0();
         assert_eq!(chp.gfx, [0; 2048]);
+    }
+
+    #[test]
+    fn add_test() {
+        let f: u8 = 0b11111111;
+        let s: u8 = 0b11111111;
+
+        let (sum, carry): (u8, bool) = f.overflowing_add(s);
+        let sum_16: u16 = f as u16 + s as u16;
+
+        assert_eq!(sum, sum_16 as u8);
+        assert_eq!(sum_16 & 0xFF, sum as u16);
+        assert_eq!(carry, true);
     }
 }
