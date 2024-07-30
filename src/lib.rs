@@ -2,6 +2,8 @@ use std::{fs, process};
 use std::path::PathBuf;
 use rand::Rng;
 
+const W:           usize = 64;
+const H:           usize = 32;
 const PROGRAM_START: u16 = 0x200;
 const ETI_660_START: u16 = 0x600;
 const FONTSET: [u8; 80]  = [
@@ -39,31 +41,31 @@ struct Chip8 {
     *   0x050-0x0A0: Used for the built-in 4x5 pixel font set (0-F)
     *   0x200-0xFFF: Program ROM and RAM
     */
-    memory:       [u8; 4096],     // 4KB memory
-    gfx:          [u8; 2048],     // 64*32 px screen
-    stack:        [u16;  16],     // Stack has 16 levels
-    key:          [u8;   16],     // HEX-based keypad (0x0-0xF). Stores current state of key
-    registers:    [u8;   16],     // 15 8-bit general-purpose registers (V0-VE; "Vx"), 16th, VF, 
-                                  // is used for the carry flag and should not be used by any program
+    memory:       [u8;  4096],     // 4KB memory
+    gfx:          [u32;  W*H],     // 64*32 px screen
+    stack:        [u16;   16],     // Stack has 16 levels
+    keypad:       [u8;    16],     // HEX-based keypad (0x0-0xF). Stores current state of key
+    registers:    [u8;    16],     // 15 8-bit general-purpose registers (V0-VE; "Vx"), 16th, VF, 
+                                   // is used for the carry flag and should not be used by any program
 }
 
 impl Chip8 {
     fn new() -> Chip8 {
         // Init registers and memory
-        let sp:           u8         = 0;              // Reset stack pointer
-        let delay_timer:  u8         = 0;
-        let sound_timer:  u8         = 0;
-        let rng_byte:     u8         = 0;
-       
-        let opcode:       u16        = 0;              // Reset current opcode
-        let idx_register: u16        = 0;              // Reset I
-        let pc:           u16        = PROGRAM_START;  // Application is loaded at location 0x200, so pc starts here
+        let sp:           u8          = 0;              // Reset stack pointer
+        let delay_timer:  u8          = 0;
+        let sound_timer:  u8          = 0;
+        let rng_byte:     u8          = 0;
         
-        let mut memory:   [u8; 4096] = [0; 4096];
-        let gfx:          [u8; 2048] = [1; 2048];
-        let stack:        [u16;  16] = [0; 16];
-        let key:          [u8;   16] = [0; 16];
-        let registers:    [u8;   16] = [0; 16];
+        let opcode:       u16         = 0;              // Reset current opcode
+        let idx_register: u16         = 0;              // Reset I
+        let pc:           u16         = PROGRAM_START;  // Application is loaded at location 0x200, so pc starts here
+        
+        let mut memory:   [u8;  4096] = [0; 4096];
+        let gfx:          [u32; 2048] = [1; 2048];
+        let stack:        [u16;   16] = [0; 16];
+        let keypad:       [u8;    16] = [0; 16];
+        let registers:    [u8;    16] = [0; 16];
 
         // Load fontset into memory
         for i in 0..80 {
@@ -81,8 +83,8 @@ impl Chip8 {
             memory,
             gfx,
             stack,
+            keypad,
             registers,
-            key
         }
     }
 
@@ -283,6 +285,94 @@ impl Chip8 {
         self.registers[0xF] = (self.registers[vx] & 0x80) >> 7u8;
         self.registers[vx] <<= 1u8;
     }
+
+    // Skip next instruction if Vx != Vy (SNE Vx, Vy)
+    fn op_9xy0(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy: usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+
+        if self.registers[vx] != self.registers[vy] {
+            self.pc += 2;
+        }
+    }
+
+    // Set I = nnn (LD I, addr)
+    fn op_Annn(&mut self) {
+        // "nnn or addr - A 12-bit value, the lowest 12 bits of the instruction"
+        let address: u16 = self.opcode & 0x0FFF_u16;
+
+        self.idx_register = address;
+    }
+
+    // Jump to location nnn + V0 (JP V0, addr)
+    fn op_Bnnn(&mut self) {
+        // "nnn or addr - A 12-bit value, the lowest 12 bits of the instruction"
+        let address: u16 = self.opcode & 0x0FFF_u16;
+
+        self.pc = self.registers[0] as u16 + address;
+    }
+
+    // Set Vx = random byte AND kk (RND Vx, byte)
+    // "The interpreter generates a random number from 0 to 255,
+    //  which is then ANDed with the value kk. The results are stored in Vx"
+    fn op_Cxkk(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "kk or byte - An 8-bit value, the lowest 8 bits of the instruction"
+        let vx: usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let kk: u8    = self.opcode as u8;
+        let r:  u8    = rand::thread_rng().gen();
+
+        self.registers[vx] = kk & r;
+    }
+
+    // Display n-byte sprite starting at location I at (Vx, Vy), set VF = collision (DRW Vx, Vy, nibble)
+    // "The interpreter reads n bytes from memory, starting at the address stored in I.
+    // These bytes are then displayed as sprites on screen at coordinates (Vx, Vy).
+    // Sprites are XORed onto the existing screen. If this causes any pixels to be erased,
+    // VF is set to 1, otherwise it is set to 0. If the sprite is positioned so part of
+    // it is outside the coordinates of the display, it wraps around to the opposite side of the screen"
+    fn op_Dxyn(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        // "y - A 4-bit value, the upper 4 bits of the low byte of the instruction"
+        // "n or nibble - A 4-bit value, the lowest 4 bits of the instruction"
+        let vx:     usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let vy:     usize = ((self.opcode & 0x00F0_u16) >> 4u8) as usize;
+        let nibble: usize =  (self.opcode & 0x000F_u16)         as usize;
+
+        // Wrap if going beyond screen boundaries
+        let x_pos: u8 = self.registers[vx] % W as u8;
+        let y_pos: u8 = self.registers[vy] % H as u8;
+
+        self.registers[0xF] = 0;
+
+        for row in 0..nibble {
+            let sprite_byte: u8 = self.memory[self.idx_register as usize + row];
+            for col in 0..8 {
+                let     sprite_pixel: u8  = sprite_byte & (0x80_u8 >> col);
+                let mut screen_pixel: u32 = (self.gfx[(y_pos as usize + row) * W as usize + (x_pos as usize + col)]);
+
+                if sprite_pixel > 0 {
+                    if screen_pixel == 0xFFFFFFFF {
+                        self.registers[0xF] = 1u8;
+                    }
+                    screen_pixel ^= 0xFFFFFFFF;
+                }
+            }
+        }
+    }
+
+    // Skip next instruction if key with value of Vx is pressed
+    fn op_Ex9E(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let key: usize =   self.registers[vx]                as usize;
+
+        if self.keypad[key] != 0u8 {
+            self.pc += 2;
+        }
+    }
 }
 
 
@@ -303,7 +393,7 @@ mod tests {
         assert_eq!(chp.gfx,          [1; 2048]);
         assert_eq!(chp.stack,        [0; 16]);
         assert_eq!(chp.registers,    [0; 16]);
-        assert_eq!(chp.key,          [0; 16]);
+        assert_eq!(chp.keypad,       [0; 16]);
 
         for i in 0..80 {
             assert_eq!(chp.memory[0x50+i], FONTSET[i]);
