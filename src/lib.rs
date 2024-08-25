@@ -2,11 +2,11 @@ use std::{fs, process};
 use std::path::PathBuf;
 use rand::Rng;
 
-const W:           usize = 64;
-const H:           usize = 32;
-const PROGRAM_START: u16 = 0x200;
-const ETI_660_START: u16 = 0x600;
-const FONTSET: [u8; 80]  = [
+const W:             usize    = 64;
+const H:             usize    = 32;
+const PROGRAM_START: u16      = 0x200;
+const ETI_660_START: u16      = 0x600;
+const FONTSET:      [u8; 80]  = [
     0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
     0x20, 0x60, 0x20, 0x20, 0x70, // 1
     0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
@@ -350,20 +350,20 @@ impl Chip8 {
         for row in 0..nibble {
             let sprite_byte: u8 = self.memory[self.idx_register as usize + row];
             for col in 0..8 {
-                let     sprite_pixel: u8  = sprite_byte & (0x80_u8 >> col);
-                let mut screen_pixel: u32 = (self.gfx[(y_pos as usize + row) * W as usize + (x_pos as usize + col)]);
+                let sprite_pixel:      u8  = sprite_byte & (0x80_u8 >> col);
+                let screen_pixel: &mut u32 = &mut (self.gfx[(y_pos as usize + row) * W as usize + (x_pos as usize + col)]);
 
                 if sprite_pixel > 0 {
-                    if screen_pixel == 0xFFFFFFFF {
+                    if *screen_pixel == 0xFFFFFFFF {
                         self.registers[0xF] = 1u8;
                     }
-                    screen_pixel ^= 0xFFFFFFFF;
+                    *screen_pixel ^= 0xFFFFFFFF;
                 }
             }
         }
     }
 
-    // Skip next instruction if key with value of Vx is pressed
+    // Skip next instruction if key with value of Vx is pressed (SKP Vx)
     fn op_Ex9E(&mut self) {
         // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
         let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
@@ -371,6 +371,125 @@ impl Chip8 {
 
         if self.keypad[key] != 0u8 {
             self.pc += 2;
+        }
+    }
+
+    // Skip next instruction if key with the value of Vx is not pressed (SKNP Vx)
+    fn op_ExA1(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let key: usize =   self.registers[vx]                as usize;
+
+        if self.keypad[key] == 0u8 {
+            self.pc += 2;
+        }
+    }
+
+    // Set Vx = delay timer (LD Vx, DT)
+    fn op_Fx07(&mut self) {
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        self.registers[vx] = self.delay_timer;
+    }
+
+    // Wait for a key press, store value of the key in Vx (LD Vx, K)
+    fn op_Fx0A(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        if      self.keypad[0]  != 0u8 { self.registers[vx] = 0;  }
+        else if self.keypad[1]  != 0u8 { self.registers[vx] = 1;  }
+        else if self.keypad[2]  != 0u8 { self.registers[vx] = 2;  }
+        else if self.keypad[3]  != 0u8 { self.registers[vx] = 3;  }
+        else if self.keypad[4]  != 0u8 { self.registers[vx] = 4;  }
+        else if self.keypad[5]  != 0u8 { self.registers[vx] = 5;  }
+        else if self.keypad[6]  != 0u8 { self.registers[vx] = 6;  }
+        else if self.keypad[7]  != 0u8 { self.registers[vx] = 7;  }
+        else if self.keypad[8]  != 0u8 { self.registers[vx] = 8;  }
+        else if self.keypad[9]  != 0u8 { self.registers[vx] = 9;  }
+        else if self.keypad[10] != 0u8 { self.registers[vx] = 10; }
+        else if self.keypad[11] != 0u8 { self.registers[vx] = 11; }
+        else if self.keypad[12] != 0u8 { self.registers[vx] = 12; }
+        else if self.keypad[13] != 0u8 { self.registers[vx] = 13; }
+        else if self.keypad[14] != 0u8 { self.registers[vx] = 14; }
+        else if self.keypad[15] != 0u8 { self.registers[vx] = 15; }
+        else                           { self.pc           -= 2;  }
+    }
+
+    // Set delay timer = Vx (LD DT, Vx)
+    fn op_fx15(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        self.delay_timer = self.registers[vx];
+    }
+
+    // Set sound timer = Vx (LD ST, Vx)
+    fn op_fx18(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        self.sound_timer = self.registers[vx];
+    }
+
+    // Set I = I + Vx (ADD I, Vx)
+    fn op_Fx1E(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        self.idx_register += self.registers[vx] as u16;
+    }
+
+    // Set I = location of sprite for digit Vx (LD F, Vx)
+    // "We know the font characters are located at 0x50, 
+    //  and we know they’re five bytes each, so we can get the address of the
+    //  first byte of any character by taking an offset from the start address."
+    fn op_Fx29(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:    usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let digit: u8    = self.registers[vx];
+
+        self.idx_register = 0x50 + (5 * digit) as u16;
+    }
+
+    // Store BCD representation of Vx in memory locations I, I+1, and I+2 (LD B, Vx)
+    // "The interpreter takes the decimal value of Vx, and places the hundreds digit
+    //  in memory at location in I, the tens digit at location I+1,
+    //  and the ones digit at location I+2."
+    fn op_Fx33(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:        usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+        let mut digit: u8    = self.registers[vx];
+
+        // Ones-place
+        self.memory[(self.idx_register + 2) as usize] = digit % 10;
+        digit /= 10;
+
+        // Tens-place
+        self.memory[(self.idx_register + 1) as usize] = digit % 10;
+        digit /= 10;
+
+        // Hundreds-place
+        self.memory[self.idx_register as usize] = digit % 10;
+    }
+
+    // Store registers V0 - Vx in memory starting at location I (LD [I], Vx)
+    fn op_Fx55(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        for i in 0..vx {
+            self.memory[(self.idx_register + i as u16) as usize] = self.registers[i];
+        }
+    }
+
+    // Read registers V0 - Vx from memory starting at location I
+    fn op_Fx65(&mut self) {
+        // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
+        let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
+
+        for i in 0..vx {
+            self.registers[i] = self.memory[(self.idx_register + i as u16) as usize];
         }
     }
 }
