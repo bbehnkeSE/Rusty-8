@@ -62,7 +62,7 @@ impl Chip8 {
         let sp:            u8         = 0;              // Reset stack pointer
         let delay_timer:   u8         = 0;
         let sound_timer:   u8         = 0;
-        let rng_byte:      u8         = 0;
+        let rng_byte:      u8         = rand::thread_rng().gen();
         
         let opcode:        u16        = 0;              // Reset current opcode
         let idx_register:  u16        = 0;              // Reset I
