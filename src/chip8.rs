@@ -179,13 +179,15 @@ impl Chip8 {
      *   Fetch next instruction
      *   Decode instruction
      *   Execute instruction
-     * 
-     * Get the first digit of the opcode with a bitmask, shift it over to a single digit from $0 to $F, 
-     * then use it as an index into the function pointer array
      */
     pub fn cycle(&mut self) {
-        // Fetch next instruction
-        self.opcode = (self.memory[(self.pc << 8u8) as usize] | self.memory[(self.pc + 1) as usize]) as u16;
+        /* Fetch next instruction
+         * Opcodes are u16, memory is [u8]. Upper half of one opcode is at memory[pc], lower half is at memory[pc+1].
+         * To get full opcode:
+         *   Promote memory[pc] to u16 and shift left 8 bits (0xAB -> 0x00AB -> 0xAB00)
+         *   Bitwise or with memory[pc+1] as u16 (0xAB00 | 0xCD -> 0x00CD = 0xABCD)
+         */
+        self.opcode = ((self.memory[self.pc as usize] as u16) << 8u8) | (self.memory[(self.pc + 1) as usize]) as u16;
         self.pc    += 2;
 
         // Decode and execute
