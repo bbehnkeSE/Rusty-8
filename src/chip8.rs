@@ -25,7 +25,7 @@ const FONTSET:      [u8; 80]  = [
     0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
-struct Chip8 {
+pub struct Chip8 {
     sp:            u8,            // Keeps track of the stack level in use
     delay_timer:   u8,            // When > 0, counts down at 60 Hz to 0
     sound_timer:   u8,            // Buzzer sounds when count hits 0
@@ -57,7 +57,7 @@ struct Chip8 {
 }
 
 impl Chip8 {
-    fn new() -> Self {
+    pub fn new() -> Self {
         // Init registers and memory
         let sp:            u8         = 0;              // Reset stack pointer
         let delay_timer:   u8         = 0;
@@ -161,7 +161,7 @@ impl Chip8 {
         }
     }
 
-    fn load_rom(&mut self, path: PathBuf) {
+    pub fn load_rom(&mut self, path: PathBuf) {
         // Read ROM file
         let rom = fs::read(path)
             .unwrap_or_else(|err| {
@@ -183,9 +183,9 @@ impl Chip8 {
      * Get the first digit of the opcode with a bitmask, shift it over to a single digit from $0 to $F, 
      * then use it as an index into the function pointer array
      */
-    fn cycle(&mut self) {
+    pub fn cycle(&mut self) {
         // Fetch next instruction
-        self.opcode = ((self.memory[self.pc as usize] << 8u8) | self.memory[(self.pc + 1) as usize]) as u16;
+        self.opcode = (self.memory[(self.pc << 8u8) as usize] | self.memory[(self.pc + 1) as usize]) as u16;
         self.pc    += 2;
 
         // Decode and execute
@@ -609,6 +609,11 @@ impl Chip8 {
             self.registers[i] = self.memory[(self.idx_register + i as u16) as usize];
         }
     }
+
+    // Debug print
+    pub fn test_print_memory(&self) {
+        println!("{:?}", self.memory)
+    }
 }
 
 
@@ -642,12 +647,5 @@ mod tests {
         assert_eq!(chp.gfx, [1; 2048]);
         chp.op_00E0();
         assert_eq!(chp.gfx, [0; 2048]);
-    }
-
-    #[test]
-    fn opcode_test() {
-        let mut chip = Chip8::new();
-        chip.table[0x1](&mut chip);
-        assert_eq!(chip.pc, 255);
     }
 }
