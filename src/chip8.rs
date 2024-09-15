@@ -616,6 +616,11 @@ impl Chip8 {
     pub fn test_print_memory(&self) {
         println!("{:?}", self.memory)
     }
+
+    // Video buffer getter
+    pub fn get_gfx(&self) -> &[u32] {
+        &self.gfx
+    }
 }
 
 
