@@ -22,18 +22,18 @@ const FONTSET:      [u8; 80]  = [
     0xF0, 0x80, 0x80, 0x80, 0xF0, // C
     0xE0, 0x90, 0x90, 0x90, 0xE0, // D
     0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
-    0xF0, 0x80, 0xF0, 0x80, 0x80  // F
+    0xF0, 0x80, 0xF0, 0x80, 0x80, // F
 ];
 
 struct Chip8 {
-    sp:           u8,             // Keeps track of the stack level in use
-    delay_timer:  u8,             // When > 0, counts down at 60 Hz to 0
-    sound_timer:  u8,             // Buzzer sounds when count hits 0
-    rng_byte:     u8,             // Random value in 0..255
+    sp:            u8,            // Keeps track of the stack level in use
+    delay_timer:   u8,            // When > 0, counts down at 60 Hz to 0
+    sound_timer:   u8,            // Buzzer sounds when count hits 0
+    rng_byte:      u8,            // Random value in 0..255
 
-    opcode:       u16,            // 35 opcodes, each 2 bytes long
-    idx_register: u16,            // Index register I
-    pc:           u16,            // Program counter (0x000-0xFFF)
+    opcode:        u16,           // 35 opcodes, each 2 bytes long
+    idx_register:  u16,           // Index register I
+    pc:            u16,           // Program counter (0x000-0xFFF)
 
     /* 
     * Memory map:
@@ -47,19 +47,26 @@ struct Chip8 {
     keypad:       [u8;    16],     // HEX-based keypad (0x0-0xF). Stores current state of key
     registers:    [u8;    16],     // 15 8-bit general-purpose registers (V0-VE; "Vx"), 16th, VF, 
                                    // is used for the carry flag and should not be used by any program
+
+    // Table of opcode function pointers
+    table:  [fn(&mut Chip8); 16],
+    table0: [fn(&mut Chip8); 16],
+    table8: [fn(&mut Chip8); 16],
+    tableE: [fn(&mut Chip8); 16],
+    tableF: [fn(&mut Chip8); 256],
 }
 
 impl Chip8 {
-    fn new() -> Chip8 {
+    fn new() -> Self {
         // Init registers and memory
-        let sp:           u8          = 0;              // Reset stack pointer
-        let delay_timer:  u8          = 0;
-        let sound_timer:  u8          = 0;
-        let rng_byte:     u8          = 0;
+        let sp:            u8         = 0;              // Reset stack pointer
+        let delay_timer:   u8         = 0;
+        let sound_timer:   u8         = 0;
+        let rng_byte:      u8         = 0;
         
-        let opcode:       u16         = 0;              // Reset current opcode
-        let idx_register: u16         = 0;              // Reset I
-        let pc:           u16         = PROGRAM_START;  // Application is loaded at location 0x200, so pc starts here
+        let opcode:        u16        = 0;              // Reset current opcode
+        let idx_register:  u16        = 0;              // Reset I
+        let pc:            u16        = PROGRAM_START;  // Application is loaded at location 0x200, so pc starts here
         
         let mut memory:   [u8;  4096] = [0; 4096];
         let gfx:          [u32; 2048] = [1; 2048];
@@ -67,6 +74,66 @@ impl Chip8 {
         let keypad:       [u8;    16] = [0; 16];
         let registers:    [u8;    16] = [0; 16];
 
+        // Populate function pointer table
+        let mut table   = [Chip8::op_null as fn(&mut Chip8); 16];
+        let mut table0  = [Chip8::op_null as fn(&mut Chip8); 16];
+        let mut table8  = [Chip8::op_null as fn(&mut Chip8); 16];
+        let mut tableE  = [Chip8::op_null as fn(&mut Chip8); 16];
+        let mut tableF  = [Chip8::op_null as fn(&mut Chip8); 256];
+        
+        for i in 0..0xE {
+            table0[i]   =  Chip8::op_null;
+            table8[i]   =  Chip8::op_null;
+            tableE[i]   =  Chip8::op_null;
+        }
+
+        for i in 0..0x65 {
+            tableF[i]   =  Chip8::op_null;
+        }
+
+        table[0x0]      =  Chip8::table_0;
+        table[0x1]      =  Chip8::op_1nnn;
+        table[0x2]      =  Chip8::op_2nnn;
+        table[0x3]      =  Chip8::op_3xkk;
+        table[0x4]      =  Chip8::op_4xkk;
+        table[0x5]      =  Chip8::op_5xy0;
+        table[0x6]      =  Chip8::op_6xkk;
+        table[0x7]      =  Chip8::op_7xkk;
+        table[0x8]      =  Chip8::table_8;
+        table[0x9]      =  Chip8::op_9xy0;
+        table[0xA]      =  Chip8::op_Annn;
+        table[0xB]      =  Chip8::op_Bnnn;
+        table[0xC]      =  Chip8::op_Cxkk;
+        table[0xD]      =  Chip8::op_Dxyn;
+        table[0xE]      =  Chip8::table_e;
+        table[0xF]      =  Chip8::table_f;
+
+        table0[0x0]     =  Chip8::op_00E0;
+        table0[0xE]     =  Chip8::op_00EE;
+
+        table8[0x0]     =  Chip8::op_8xy0;
+        table8[0x1]     =  Chip8::op_8xy1;
+        table8[0x2]     =  Chip8::op_8xy2;
+        table8[0x3]     =  Chip8::op_8xy3;
+        table8[0x4]     =  Chip8::op_8xy4;
+        table8[0x5]     =  Chip8::op_8xy5;
+        table8[0x6]     =  Chip8::op_8xy6;
+        table8[0x7]     =  Chip8::op_8xy7;
+        table8[0xE]     =  Chip8::op_8xyE;
+
+        tableE[0x1]     =  Chip8::op_ExA1;
+        tableE[0xE]     =  Chip8::op_Ex9E;
+
+        tableF[0x07]    =  Chip8::op_Fx07;
+        tableF[0x0A]    =  Chip8::op_Fx0A;
+        tableF[0x15]    =  Chip8::op_Fx15;
+        tableF[0x18]    =  Chip8::op_Fx18;
+        tableF[0x1E]    =  Chip8::op_Fx1E;
+        tableF[0x29]    =  Chip8::op_Fx29;
+        tableF[0x33]    =  Chip8::op_Fx33;
+        tableF[0x55]    =  Chip8::op_Fx55;
+        tableF[0x65]    =  Chip8::op_Fx65;
+        
         // Load fontset into memory
         for i in 0..80 {
             memory[0x50 + i] = FONTSET[i];
@@ -85,6 +152,12 @@ impl Chip8 {
             stack,
             keypad,
             registers,
+
+            table,
+            table0,
+            table8,
+            tableE,
+            tableF,
         }
     }
 
@@ -102,11 +175,55 @@ impl Chip8 {
         }
     }
 
+    /* Cycle:
+     *   Fetch next instruction
+     *   Decode instruction
+     *   Execute instruction
+     * 
+     * Get the first digit of the opcode with a bitmask, shift it over to a single digit from $0 to $F, 
+     * then use it as an index into the function pointer array
+     */
+    fn cycle(&mut self) {
+        // Fetch next instruction
+        self.opcode = ((self.memory[self.pc as usize] << 8u8) | self.memory[(self.pc + 1) as usize]) as u16;
+        self.pc    += 2;
+
+        // Decode and execute
+        self.table[((self.opcode & 0xF000_u16) >> 12u8) as usize](self);
+
+        // Decrement delay and sound timers if they've been set
+        if self.delay_timer > 0 { self.delay_timer -= 1; }
+        if self.sound_timer > 0 { self.sound_timer -= 1; }
+    }
+
 
     /************************************************/
     /******            Instructions            ******/
     /************************************************/
 
+    // Index function pointer tables with opcodes
+    fn table_0(&mut self) {
+        self.table0[(self.opcode & 0x000F) as usize](self);
+    }
+
+    fn table_8(&mut self) {
+        self.table8[(self.opcode & 0x000F) as usize](self);
+    }
+
+    fn table_e(&mut self) {
+        self.tableE[(self.opcode & 0x000F) as usize](self);
+    }
+
+    fn table_f(&mut self) {
+        self.tableF[(self.opcode & 0x00FF) as usize](self);
+    }
+    
+    
+    /*** Opcodes ***/
+
+    // Null
+    fn op_null(&mut self) {}
+    
     // Clear the display (CLS)
     fn op_00E0(&mut self) {
         self.gfx.fill(0);
@@ -417,7 +534,7 @@ impl Chip8 {
     }
 
     // Set delay timer = Vx (LD DT, Vx)
-    fn op_fx15(&mut self) {
+    fn op_Fx15(&mut self) {
         // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
         let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
 
@@ -425,7 +542,7 @@ impl Chip8 {
     }
 
     // Set sound timer = Vx (LD ST, Vx)
-    fn op_fx18(&mut self) {
+    fn op_Fx18(&mut self) {
         // "x - A 4-bit value, the lower 4 bits of the high byte of the instruction"
         let vx:  usize = ((self.opcode & 0x0F00_u16) >> 8u8) as usize;
 
@@ -528,15 +645,9 @@ mod tests {
     }
 
     #[test]
-    fn add_test() {
-        let f: u8 = 0b11111111;
-        let s: u8 = 0b11111111;
-
-        let (sum, carry): (u8, bool) = f.overflowing_add(s);
-        let sum_16: u16 = f as u16 + s as u16;
-
-        assert_eq!(sum, sum_16 as u8);
-        assert_eq!(sum_16 & 0xFF, sum as u16);
-        assert_eq!(carry, true);
+    fn opcode_test() {
+        let mut chip = Chip8::new();
+        chip.table[0x1](&mut chip);
+        assert_eq!(chip.pc, 255);
     }
 }
