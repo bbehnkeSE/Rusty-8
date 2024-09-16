@@ -2,8 +2,8 @@ use std::{fs, process};
 use std::path::PathBuf;
 use rand::Rng;
 
-const W:             usize    = 64;
-const H:             usize    = 32;
+pub const W:         usize    = 64;
+pub const H:         usize    = 32;
 const PROGRAM_START: u16      = 0x200;
 const ETI_660_START: u16      = 0x600;
 const FONTSET:      [u8; 80]  = [
@@ -461,8 +461,8 @@ impl Chip8 {
         let nibble: usize =  (self.opcode & 0x000F_u16)         as usize;
 
         // Wrap if going beyond screen boundaries
-        let x_pos: u8 = self.registers[vx] % W as u8;
-        let y_pos: u8 = self.registers[vy] % H as u8;
+        let x_pos: usize = self.registers[vx] as usize % W;
+        let y_pos: usize = self.registers[vy] as usize % H;
 
         self.registers[0xF] = 0;
 
@@ -470,7 +470,7 @@ impl Chip8 {
             let sprite_byte: u8 = self.memory[self.idx_register as usize + row];
             for col in 0..8 {
                 let sprite_pixel:      u8  = sprite_byte & (0x80_u8 >> col);
-                let screen_pixel: &mut u32 = &mut (self.gfx[(y_pos as usize + row) * W as usize + (x_pos as usize + col)]);
+                let screen_pixel: &mut u32 = &mut (self.gfx[(y_pos + row) * W as usize + (x_pos + col)]);
 
                 if sprite_pixel > 0 {
                     if *screen_pixel == 0xFFFFFFFF {
